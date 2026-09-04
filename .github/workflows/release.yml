@@ -1,0 +1,327 @@
+# ═══════════════════════════════════════════════════════════════════════════
+#  Release — build a SIGNED release APK + AAB and publish them to a GitHub
+#  Release.
+#
+#  Trigger: ANY push to main. There is nothing to remember and nothing to run
+#  by hand — code on main is code that shipped.
+#
+#    · push to main   -> patch bump off the highest existing tag (v0.1.0 -> v0.1.1)
+#    · push a tag     -> that exact version, for a minor or major bump
+#                        git tag v0.2.0 && git push origin v0.2.0
+#    · [skip release] -> in the commit SUBJECT line, to push without shipping
+#
+#  Doc-only changes never ship; see paths-ignore below.
+#
+#  The version is the single source of truth for versionCode, derived as
+#  major*10000 + minor*100 + patch (0.2.0 -> 200), which is monotonic as long
+#  as versions are. Nothing needs to be committed to cut a release; on a main
+#  push the tag is created by the release step at the exact commit that was
+#  built and signature-verified.
+#
+#  This workflow REFUSES to run unsigned. An unsigned APK cannot be installed on
+#  a watch, so publishing one would produce a release that looks fine and is
+#  useless; the preflight step below fails the job instead.
+# ═══════════════════════════════════════════════════════════════════════════
+name: Release
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "**/*.md"
+      - "docs/**"
+      - ".gitignore"
+      - ".github/workflows/android-ci.yml"
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Version to build, e.g. v0.2.0 (blank = bump patch)"
+        required: false
+        type: string
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  # ── Should this push ship? ───────────────────────────────────────────────
+  # A separate job purely so the decision can be made in shell rather than in a
+  # GitHub expression. `contains(github.event.head_commit.message, ...)` reads
+  # the WHOLE message, body included — so a commit that merely mentions the
+  # skip token in its body would skip its own release. Only the subject line
+  # counts, and expressions cannot split a string.
+  gate:
+    name: Decide whether to ship
+    runs-on: ubuntu-latest
+    outputs:
+      ship: ${{ steps.decide.outputs.ship }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - id: decide
+        run: |
+          # An explicit tag is an explicit request; it always ships.
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            echo "ship=true" >> "$GITHUB_OUTPUT"
+            echo "Tag push - shipping."
+            exit 0
+          fi
+          SUBJECT=$(git log -1 --format=%s)
+          echo "Subject: $SUBJECT"
+          case "$SUBJECT" in
+            *"[skip release]"*)
+              echo "ship=false" >> "$GITHUB_OUTPUT"
+              echo "Subject carries the skip token - not shipping."
+              ;;
+            *)
+              echo "ship=true" >> "$GITHUB_OUTPUT"
+              echo "Shipping."
+              ;;
+          esac
+
+  release:
+    name: Build signed release & publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    needs: gate
+    if: needs.gate.outputs.ship == 'true'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          fetch-depth: 0
+
+      # ── Preflight ───────────────────────────────────────────────────────
+      # Fail before spending fifteen minutes on a build whose output we would
+      # have to throw away.
+      - name: Verify signing secrets are present
+        env:
+          RELEASE_KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
+          RELEASE_KEYSTORE_PASSWORD: ${{ secrets.RELEASE_KEYSTORE_PASSWORD }}
+          RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
+          RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
+        run: |
+          # Explicit `if` blocks rather than `[ ... ] && x`: this step runs under
+          # `bash -e`, where a bare failing AND-list can abort the step and turn
+          # a clear "secret missing" message into a silent exit.
+          missing=""
+          if [ -z "$RELEASE_KEYSTORE_BASE64" ];   then missing="$missing RELEASE_KEYSTORE_BASE64"; fi
+          if [ -z "$RELEASE_KEYSTORE_PASSWORD" ]; then missing="$missing RELEASE_KEYSTORE_PASSWORD"; fi
+          if [ -z "$RELEASE_KEY_ALIAS" ];         then missing="$missing RELEASE_KEY_ALIAS"; fi
+          if [ -z "$RELEASE_KEY_PASSWORD" ];      then missing="$missing RELEASE_KEY_PASSWORD"; fi
+          if [ -n "$missing" ]; then
+            echo "::error::Missing repository secret(s):$missing"
+            echo "A release must be signed. See docs/RELEASING.md for how to create the keystore and set these."
+            exit 1
+          fi
+          echo "All four signing secrets present."
+
+      - name: Resolve version
+        id: version
+        run: |
+          git fetch --tags --force --quiet
+
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            TAG="${{ github.ref_name }}"
+            echo "Source: pushed tag"
+          elif [ -n "${{ inputs.tag }}" ]; then
+            TAG="${{ inputs.tag }}"
+            echo "Source: manual dispatch"
+          else
+            # Push to main: bump the patch of the highest existing version tag.
+            # sort -V so v0.10.0 sorts above v0.9.0, which lexical sort gets
+            # wrong and would silently start re-releasing old versions.
+            LATEST=$(git tag -l 'v[0-9]*.[0-9]*.[0-9]*' | sort -V | tail -1)
+            if [ -z "$LATEST" ]; then
+              TAG="v0.1.0"
+              echo "Source: no existing tags, seeding $TAG"
+            else
+              B="${LATEST#v}"
+              MA=$(echo "$B" | cut -d. -f1)
+              MI=$(echo "$B" | cut -d. -f2)
+              PA=$(echo "$B" | cut -d. -f3)
+              TAG="v${MA}.${MI}.$((PA + 1))"
+              echo "Source: auto-bump from $LATEST"
+            fi
+          fi
+
+          echo "Tag: $TAG"
+          if ! echo "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::'$TAG' is not of the form vMAJOR.MINOR.PATCH (e.g. v0.2.0)."
+            exit 1
+          fi
+          if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null && [ "${{ github.ref_type }}" != "tag" ]; then
+            echo "::error::Tag $TAG already exists. Push a tag explicitly to rebuild it."
+            exit 1
+          fi
+          NAME="${TAG#v}"
+          MAJOR=$(echo "$NAME" | cut -d. -f1)
+          MINOR=$(echo "$NAME" | cut -d. -f2)
+          PATCH=$(echo "$NAME" | cut -d. -f3)
+          CODE=$((MAJOR * 10000 + MINOR * 100 + PATCH))
+          echo "tag=$TAG"          >> "$GITHUB_OUTPUT"
+          echo "name=$NAME"        >> "$GITHUB_OUTPUT"
+          echo "code=$CODE"        >> "$GITHUB_OUTPUT"
+          echo "versionName=$NAME, versionCode=$CODE"
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Make gradlew executable
+        run: chmod +x gradlew
+
+      # ── Build config that never reaches source control ──────────────────
+      - name: Write local.properties (Igor config)
+        env:
+          IGOR_BASE_URL: ${{ secrets.IGOR_BASE_URL }}
+          IGOR_API_KEY: ${{ secrets.IGOR_API_KEY }}
+        run: |
+          cat >> local.properties <<EOF
+          IGOR_BASE_URL=$IGOR_BASE_URL
+          IGOR_API_KEY=$IGOR_API_KEY
+          EOF
+
+      # Louder than a normal warning: without Firebase this app loses the one
+      # capability that distinguishes it from the phone client — Igor being able
+      # to WAKE it for a live health query. It still collects and uploads on the
+      # trickle, but the whole §1.2 argument goes with it.
+      - name: Write google-services.json (Firebase)
+        env:
+          GOOGLE_SERVICES_JSON_BASE64: ${{ secrets.GOOGLE_SERVICES_JSON_BASE64 }}
+        run: |
+          if [ -n "$GOOGLE_SERVICES_JSON_BASE64" ]; then
+            echo "$GOOGLE_SERVICES_JSON_BASE64" | base64 -d > app/google-services.json
+            echo "Firebase config written; FCM push wake will be live in this build."
+          else
+            echo "::warning::GOOGLE_SERVICES_JSON_BASE64 not set. Releasing WITHOUT Firebase — Igor cannot wake this watch, and live health queries fall back to the 15-minute demand poll."
+          fi
+
+      - name: Decode keystore
+        env:
+          RELEASE_KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
+        run: |
+          # Outside the workspace so it can never be picked up by a build task
+          # or swept into an artifact upload glob.
+          mkdir -p "$RUNNER_TEMP/signing"
+          echo "$RELEASE_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/signing/release.jks"
+          if [ ! -s "$RUNNER_TEMP/signing/release.jks" ]; then
+            echo "::error::Decoded keystore is empty — RELEASE_KEYSTORE_BASE64 is probably not valid base64."
+            exit 1
+          fi
+          echo "Keystore decoded ($(stat -c%s "$RUNNER_TEMP/signing/release.jks") bytes)."
+
+      # ── Gate: the release path must be clean before we publish ──────────
+      - name: Unit tests
+        run: ./gradlew testDebugUnitTest --no-daemon
+
+      - name: Lint (release-vital)
+        run: ./gradlew lintVitalRelease --no-daemon
+
+      # ── The actual release build ────────────────────────────────────────
+      - name: Assemble signed APK & AAB
+        env:
+          RELEASE_KEYSTORE_PATH: ${{ runner.temp }}/signing/release.jks
+          RELEASE_KEYSTORE_PASSWORD: ${{ secrets.RELEASE_KEYSTORE_PASSWORD }}
+          RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
+          RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
+        run: |
+          ./gradlew assembleRelease bundleRelease --no-daemon \
+            -PatomixVersionName="${{ steps.version.outputs.name }}" \
+            -PatomixVersionCode="${{ steps.version.outputs.code }}"
+
+      # ── Prove it is actually signed before publishing ───────────────────
+      - name: Verify APK signature
+        run: |
+          APK=$(find app/build/outputs/apk/release -name "*.apk" | head -1)
+          if [ -z "$APK" ]; then
+            echo "::error::No release APK was produced."
+            exit 1
+          fi
+          echo "APK: $APK"
+          BUILD_TOOLS=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
+          echo "Using build-tools: $BUILD_TOOLS"
+          "$BUILD_TOOLS/apksigner" verify --print-certs "$APK"
+          echo "Signature verified."
+
+      - name: Stage release artifacts
+        id: stage
+        run: |
+          VERSION="${{ steps.version.outputs.name }}"
+          mkdir -p dist
+          cp "$(find app/build/outputs/apk/release    -name '*.apk' | head -1)" "dist/atomix-wear-${VERSION}.apk"
+          cp "$(find app/build/outputs/bundle/release -name '*.aab' | head -1)" "dist/atomix-wear-${VERSION}.aab"
+          # A checksum file, so a sideloaded APK can be verified on the far end.
+          ( cd dist && sha256sum ./*.apk ./*.aab > SHA256SUMS.txt )
+          ls -lh dist
+          cat dist/SHA256SUMS.txt
+
+      # Retained independently of the Release, so a deleted or re-cut release
+      # never loses the exact bits that were tested.
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: atomix-wear-${{ steps.version.outputs.name }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Upload mapping file
+        uses: actions/upload-artifact@v4
+        with:
+          name: r8-mapping-${{ steps.version.outputs.name }}
+          path: app/build/outputs/mapping/release/
+          if-no-files-found: warn
+          # The mapping is the only way to read a stack trace from an R8-minified
+          # build. Losing it makes every future crash report unreadable, so it
+          # outlives the artifacts themselves.
+          retention-days: 365
+
+      # ── Publish ─────────────────────────────────────────────────────────
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          # On a main push the tag does not exist yet; the action creates it
+          # here, pinned to the exact commit that was built and verified.
+          target_commitish: ${{ github.sha }}
+          name: Atomix Wear ${{ steps.version.outputs.name }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          body: |
+            **Atomix Wear ${{ steps.version.outputs.name }}** · versionCode `${{ steps.version.outputs.code }}`
+
+            Sideload onto a Galaxy Watch:
+
+            ```
+            adb connect <watch-ip>:5555
+            adb install -r atomix-wear-${{ steps.version.outputs.name }}.apk
+            ```
+
+            After installing, open the app once and grant **body sensors** — then
+            grant background sensor access when prompted separately. Without the
+            second grant, collection stops whenever the app is not in the
+            foreground.
+
+            `atomix-wear-${{ steps.version.outputs.name }}.aab` is the Play-format
+            bundle. Verify downloads against `SHA256SUMS.txt`.
+          files: |
+            dist/atomix-wear-${{ steps.version.outputs.name }}.apk
+            dist/atomix-wear-${{ steps.version.outputs.name }}.aab
+            dist/SHA256SUMS.txt
+
+      - name: Clean up keystore
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/signing"
