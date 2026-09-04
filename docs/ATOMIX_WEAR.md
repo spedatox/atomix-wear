@@ -100,15 +100,17 @@ its own CI and its own release pipeline.
 | Training Protocol amendment | `prompts/agents/atomix/02_training_protocol.md` | edit |
 | Health ingest | `routers/health.py`, `services/health.py` | **unchanged** |
 
-**Licensing.** AGPL-3.0-or-later, with an SPDX header on every source file —
-inherited from Mark VI rather than from Ultron Wear, which is MIT. This client
-is a Mark VI component that happens to live in its own repository for build and
-release reasons, not an independent product.
+**Licensing.** AGPL-3.0-or-later, with an SPDX header on every source file. A
+deliberate choice matching Mark VI, not a consequence of anything: no dependency
+here requires copyleft (the exercise dataset is MIT — permissive), and Ultron
+Wear is MIT while being just as much a Mark VI client. The licence is decided
+per project. Third-party obligations are in §5.2 and the README.
 
-Because it is a Mark VI client, the cross-client parity rule in speda-mark6's
-`CLAUDE.md` still applies to it across the repository boundary: a change to a
-shared surface here has to reach Heartbreaker, Striker and Speda GO in the same
-piece of work, and vice versa.
+Both watch clients live in their own repositories for build and release reasons
+— each is a self-contained Gradle build wanting its own signed-release pipeline,
+which does not belong in a Python monorepo. That is a packaging decision and
+nothing more; the cross-client parity rule in speda-mark6's `CLAUDE.md` applies
+across the repository boundary exactly as it does within it.
 
 ---
 
@@ -328,8 +330,12 @@ The dataset is not licensed as one thing, and the split decides how we store it:
 
 | Part | Licence | What we do |
 |---|---|---|
-| Data — names, targets, equipment, instructions | **MIT** | Vendored into the repo, attributed |
+| Data — names, targets, equipment, instructions | **MIT**, © 2026 Hasan Emir Yıldırım | Vendored into the repo, with the upstream MIT copyright and permission notice preserved alongside it |
 | Media — images and GIFs | **Proprietary to Gym Visual**, carried by that repo under separate written permission | **Never committed.** Fetched at runtime, cached |
+
+MIT is permissive, so vendoring the data imposes no copyleft on this project and
+carries exactly one obligation: keep the notice. It flows into an AGPL codebase
+cleanly, permissive into copyleft being the compatible direction.
 
 The notice is explicit that downstream users must *"obtain their own separate
 license for reuse beyond what Gym Visual's terms permit"*, and that every use
