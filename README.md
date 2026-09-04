@@ -178,9 +178,23 @@ client is.)
 | What | Licence | What we owe |
 |---|---|---|
 | [exercises-dataset](https://github.com/hasaneyldrm/exercises-dataset) — names, targets, equipment, instructions | MIT, © 2026 Hasan Emir Yıldırım | Preserve the copyright and permission notice wherever the data is vendored |
-| The same dataset's images and GIFs | Proprietary, © Gym visual | Display `© Gym visual — https://gymvisual.com/`; 180×180 only; obtain a separate licence for reuse beyond [their terms](https://gymvisual.com/content/3-terms-and-conditions-of-use) |
+| The same dataset's images and GIFs | Proprietary, © Gym visual | Display `© Gym visual — https://gymvisual.com/`; 180×180 only; see the three rules below |
 
 MIT is compatible with AGPL in this direction (permissive into copyleft), so
-vendoring the data is clean. The media is not ours to relicense under anything,
-which is why it is fetched and cached at runtime rather than committed — see
+vendoring the data is clean.
+
+The media is a different matter. Gym Visual's
+[terms](https://gymvisual.com/content/3-terms-and-conditions-of-use) **expressly
+permit** using it to illustrate an *"Android or iOS mobile application"* — this
+app displays the GIFs, and that is allowed. The same terms prohibit three things
+this codebase must therefore never do:
+
+1. **Never commit the media.** Redistribution is prohibited, so GIFs are fetched
+   at runtime and cached, never checked in.
+2. **Never make the media endpoint public.** `GET /training/media/{id}.gif` stays
+   behind `X-API-Key`; *"make available on a website for download"* is prohibited.
+3. **Never feed the media to a model.** Display only — no generation input, no
+   training, no embedding pipeline.
+
+Full reasoning in
 [ATOMIX_WEAR.md §5.2](docs/ATOMIX_WEAR.md#52-two-licences-two-storage-rules).

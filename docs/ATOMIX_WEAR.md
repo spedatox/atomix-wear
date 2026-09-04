@@ -337,9 +337,22 @@ MIT is permissive, so vendoring the data imposes no copyleft on this project and
 carries exactly one obligation: keep the notice. It flows into an AGPL codebase
 cleanly, permissive into copyleft being the compatible direction.
 
-The notice is explicit that downstream users must *"obtain their own separate
-license for reuse beyond what Gym Visual's terms permit"*, and that every use
-must display `© Gym visual — https://gymvisual.com/`. Each record in
+### Using the media is permitted; republishing it is not
+
+To be unambiguous, because this has been muddled once already: **the app
+displays the GIFs, and Gym Visual's terms expressly allow that.** Their permitted
+uses name *"Android or iOS mobile application (apps)"* directly, and Wear OS is
+Android.
+
+What the same terms prohibit maps onto three concrete rules for this codebase:
+
+| Their prohibition | What it means here |
+|---|---|
+| *"resell or redistribute"* | The GIFs are never committed to this repository. §5.2's storage rule is a licence requirement, not a preference. |
+| *"make available on a website for download"* | `GET /training/media/{id}.gif` **must stay authenticated**. It already requires `X-API-Key` under Igor's Rule 12; that is now load-bearing for licensing too. Never expose it publicly or behind a guessable unauthenticated path. |
+| *"post, distribute or sell on any AI platform"*, *"use as a basis for creating and generating content using AI"* | The media is **display-only**. Atomix selects which exercise to show; the GIF itself is never sent to a model, used as generation input, or included in any training or embedding pipeline. Mark VI is an AI system, so this line is easy to cross by accident — do not. |
+
+Every use must display `© Gym visual — https://gymvisual.com/`. Each record in
 `exercises.json` already carries that string in its `attribution` field, so the
 wire format (§4.5) passes it through and the exercise card renders it.
 
